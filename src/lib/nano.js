@@ -37,6 +37,33 @@ export function xnoToRaw(xno) {
   return whole * XNO_RAW + BigInt(frac);
 }
 
+// A node lookup must never hang or be fed an unbounded body, and credentials
+// or payment data must not travel over plain HTTP to a remote node.
+export const RPC_TIMEOUT_MS = 10_000;
+export const RPC_MAX_BYTES = 64 * 1024;
+
+/** Allow https, or http only to a loopback host; refuse anything else. */
+export function assertSafeRpcUrl(rpcUrl) {
+  let u;
+  try {
+    u = new URL(rpcUrl);
+  } catch {
+    throw new Error("invalid Nano RPC URL");
+  }
+  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
+  if (u.protocol === "https:" || (u.protocol === "http:" && loopback)) return u;
+  throw new Error("Nano RPC URL must be https (plain http only for loopback)");
+}
+
+async function readBoundedJson(res) {
+  const declared = Number(res.headers && res.headers.get ? res.headers.get("content-length") : 0);
+  if (declared > RPC_MAX_BYTES) throw new Error("Nano RPC response too large");
+  if (typeof res.text !== "function") return res.json();
+  const text = await res.text();
+  if (text.length > RPC_MAX_BYTES) throw new Error("Nano RPC response too large");
+  return JSON.parse(text);
+}
+
 /**
  * Fetch one Nano block's state from a public RPC node.
  * `block_info` returns the block amount, confirmation state and the account.
@@ -45,6 +72,7 @@ export function xnoToRaw(xno) {
  * @param {string} [rpcUrl] public RPC endpoint
  */
 export async function nanoBlockInfo(blockHash, fetchImpl = globalThis.fetch, rpcUrl = "https://rpc.nano.to") {
+  assertSafeRpcUrl(rpcUrl);
   const res = await fetchImpl(rpcUrl, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -53,11 +81,12 @@ export async function nanoBlockInfo(blockHash, fetchImpl = globalThis.fetch, rpc
       json_block: "true",
       hash: blockHash,
     }),
+    signal: AbortSignal.timeout(RPC_TIMEOUT_MS),
   });
   if (!res.ok) {
     throw new Error(`Nano RPC error: HTTP ${res.status}`);
   }
-  const data = await res.json();
+  const data = await readBoundedJson(res);
   if (data.error) throw new Error(`Nano RPC error: ${data.error}`);
   // `block_account` is the account that owns (signed) the block; some nodes
   // also expose it as `account`. Normalize so callers can rely on `account`.

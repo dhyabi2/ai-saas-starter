@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { checkNanoPayment, verifyNanoPayment, nanoBlockInfo, paymentTag, quoteRaw, rawToXno, xnoToRaw, XNO_RAW, TAG_SPACE } from "../src/lib/nano.js";
+import { checkNanoPayment, verifyNanoPayment, nanoBlockInfo, assertSafeRpcUrl, RPC_MAX_BYTES, paymentTag, quoteRaw, rawToXno, xnoToRaw, XNO_RAW, TAG_SPACE } from "../src/lib/nano.js";
 
 // A fake public RPC node we control, so tests are network-free and deterministic.
 function rpcNode(responder) {
@@ -124,4 +124,29 @@ test("nanoBlockInfo throws on HTTP error", async () => {
 test("nanoBlockInfo throws on RPC error field", async () => {
   const fetch = rpcNode(() => ({ error: "Block not found" }));
   await assert.rejects(() => nanoBlockInfo(SEND_HASH, fetch), /Block not found/);
+});
+
+test("RPC URL: https and loopback http allowed, remote plain http refused", () => {
+  assert.doesNotThrow(() => assertSafeRpcUrl("https://rpc.nano.to"));
+  assert.doesNotThrow(() => assertSafeRpcUrl("http://127.0.0.1:7076"));
+  assert.throws(() => assertSafeRpcUrl("http://rpc.example.com"));
+  assert.throws(() => assertSafeRpcUrl("ftp://x"));
+});
+
+test("checkNanoPayment fails closed on a remote plain-http node and never calls it", async () => {
+  let called = false;
+  const r = await checkNanoPayment({ blockHash: SEND_HASH, expectedRaw: PRICE, address: ACCOUNT, rpcUrl: "http://rpc.example.com", fetch: async () => { called = true; } });
+  assert.equal(r, null);
+  assert.equal(called, false);
+});
+
+test("checkNanoPayment fails closed on an oversized node response", async () => {
+  const big = async () => ({ ok: true, status: 200, async text() { return "x".repeat(RPC_MAX_BYTES + 1); } });
+  assert.equal(await checkNanoPayment({ blockHash: SEND_HASH, expectedRaw: PRICE, address: ACCOUNT, fetch: big }), null);
+});
+
+test("node lookup carries an abort signal (timeout)", async () => {
+  let sig;
+  await nanoBlockInfo(SEND_HASH, async (u, init) => { sig = init.signal; return { ok: true, async json() { return {}; } }; });
+  assert.ok(sig instanceof AbortSignal);
 });
